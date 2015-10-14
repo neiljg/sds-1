@@ -1,0 +1,204 @@
+library("readr")
+library("knitr")
+library("devtools")
+library("plyr")
+library("dplyr")
+library("ggplot2")
+library("lubridate")
+library("countrycode")
+library("mapdata")
+library("ggmap")
+library("maps")
+library("stringr")
+
+# User should change the path to fit location of file nationality.csv
+mypath="C:/Users/Neil/Documents/Polit studiet/Kandidat/3. semester/Social Data Science/Assignment 1/nationality.csv"
+
+df.all <- read_csv("https://raw.githubusercontent.com/MuseumofModernArt/collection/master/Artworks.csv")
+
+#####################################
+# Question 1
+#####################################
+
+# Cleaning data - removing observations without DateAcquired, and 
+# restricting to only include paintings
+
+df = df.all %>% filter(!is.na(DateAcquired))
+df = df %>% filter(Classification=="Painting")
+
+# Change DateAcquired to date format that includes only month and year
+df$shortdate <- strftime(df$DateAcquired,"%Y-%m")
+
+# Sorting data by date to get the cumulative stock
+
+df <- df[order(as.Date(paste(df$shortdate,"-01",sep=""), format="%Y-%m-%d")),]
+
+# Creating a new column with the cumulative stock of works
+df<- data.frame(df[1:15],1)
+colnames(df)[16] <- "ones"
+df <- data.frame(df[1:16],cumsum(df$ones))
+colnames(df)[17] <- "Stock"
+
+#####################################
+# Question 2
+#####################################
+
+# Creating figure
+
+# Re-configure date variable to include a nominal day value
+df$newdate <- as.Date(paste(df$shortdate,"-01",sep=""))
+                   
+p = ggplot(df, aes(x = as.Date(newdate), y =cumsum(ones)/1000)) + labs(x = "Time", y = "Cumulative stock, 1,000", title = "Stock of Paintings in MoMA")
+p + geom_line(color="red")
+
+#####################################
+# Question 3
+#####################################
+
+curator = df %>% group_by(newdate, CuratorApproved) %>% summarise(Stock =n())
+
+curator2= curator %>% group_by(CuratorApproved) %>% mutate(Stock1 = cumsum(Stock))
+
+p = ggplot(curator2, aes(x = as.Date(newdate), y = Stock1)) +
+  labs(x = "Time", y = "Cumulative stock", title = "Stock of Paintings in MoMA")
+p + geom_line(aes(group=CuratorApproved, colour = CuratorApproved))
+
+
+#####################################
+# Question 4
+#####################################
+
+# Having conditioned the data to include only paintings, only four departments remain
+table(df$Department)
+
+#####################################
+# Question 5
+#####################################
+
+p = ggplot(df,aes(x=Department)) + geom_histogram()
+plot(p)
+# We can see that one department clearly dominates
+
+#####################################
+# Question 6
+#####################################
+
+
+artists <- as.data.frame(table(df$Artist))
+artists10 <- head(artists[rev(order(artists$Freq)),],10)
+
+artists10
+
+# Here, we find the 10 artists who have contributed most paintings, and the number of paintings.
+
+#####################################
+# Question 7
+#####################################
+
+# The first piece of code pulls out the first character string in the ArtistBio column, 
+# unless the column contains the word "born", in which case it pulls out the character
+# string following "born".
+
+df$birthplace <-   apply(df, 1, function(x) 
+                      ifelse(length(grep("born",x[3])), 
+                    gsub(pattern = "(.*, born)(.*)(. .*)", replacement = "\\2",x[3]),
+                      substring(gsub(",.*$", "", x[3]),2)))
+
+# However, in some cases born is not followed by a character string, just numbers, i.e.
+# a year of birth, in which case we still want the first character string in the ArtistBio
+# column. Other exceptions are not captured, and will thus not be matched to countries.
+
+df$birthplace <-   apply(df, 1, function(x) 
+                      ifelse(length(grep("born",x[19])),
+                             substring(gsub(",.*$", "", x[19]),2),
+                               x[19]))
+
+# Many of the birthplace variables are nationalities, e.g. "French", instead of "France".
+# We import a data set to translate nationalities to country names, collected manually
+# from the web. The import uses the mypath  variable from the start of this script.
+
+nat <- read_csv(mypath)
+nat$birthplace <- nat$V2
+nat <- nat[,c("V1","birthplace")]
+nat$birthplace <- substr(nat$birthplace,1,nchar(nat$birthplace)-1)
+
+# Here, we merge country names by matching nationalities.
+
+df2 <- left_join(df,nat)
+df2$country <- df2$V1
+
+# If no match has been made, we simply prescribe the birthplace column again, as this 
+# column also includes actual country names, not nationalities, in some cases.
+
+df2$country[is.na(df2$V1)] <- df2$birthplace[is.na(df2$V1)]
+
+# We now create a new variable with UN country codes, based on the country names.
+
+df2$code <- countrycode(df2$country,"country.name","un")
+
+sum(is.na(df2$code))
+
+# 115 of the paintings have not been assigned a country code, either because the
+# the string analysis was unsuccesful, or the country does not match countrycodes
+# database, e.g. "Russia (now Latvia)".
+
+# Now, we import a world map.
+
+world <- map_data("world")
+
+# And create a UN country code variable. 
+
+world$code <- countrycode(world$region,"country.name","un")
+
+# We count the number of paintings by country
+
+df3 <- count(df2,code)
+
+# And merge this data to the map data set.
+
+world_data <- right_join(df3, world)
+
+# If no data has been merged, then the country has contributed 0 paintings.
+
+world_data$n[is.na(world_data$n)] <- 0
+
+
+p = ggplot(world_data, aes(x = long, y = lat, group = group)) + 
+  geom_polygon(aes(fill = n)) + 
+  expand_limits() + 
+  theme_minimal()
+p
+
+# We can see that artists born in the USA contribute by far the most paintings.
+                   
+#####################################
+# Question 8
+#####################################
+
+# We find the metric dimensions by extracting the string from within the parenthesis
+# of the dimensions column.
+
+df$size=str_extract(df$Dimensions, "([0.0-9.9]+ x [0.0-9.9]+ cm)")
+
+# The length is then the first part of this string, the width is the second.
+
+df$sizeL=gsub("x [0.0-9.9]+ cm", "", df$size)
+df$sizeB=gsub("[0.0-9.9]+ x", "", df$size)
+
+df$sizeB=gsub("cm", "", df$sizeB)
+
+# The area is the product of these two numbers in cm squared.
+
+df$areal = as.numeric(df$sizeB)*as.numeric(df$sizeL)
+
+# Rangorden
+
+df4 <- df[!is.na(df$areal),]
+df4 <- df4[order(df4$areal, decreasing = FALSE),]
+
+# The 5 smallest paintings and the artist.
+head(df4[,c(2,23)],5)
+
+# The 5 largest paintings and the artist.
+tail(df4[,c(2,23)],5)
+                   
